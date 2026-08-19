@@ -1,0 +1,390 @@
+#script 2 shiny dashboard
+
+library(shiny)
+library(shinydashboard)
+library(DT)
+library(ggplot2)
+library(ggrepel)
+library(factoextra)
+library(openxlsx)
+library(writexl)
+library(dplyr)
+source("analysis_functions.R")
+ui <- dashboardPage(
+  
+  dashboardHeader(
+    title = "Surfactant Analysis Dashboard"
+  ),
+  
+  dashboardSidebar(
+    
+    fileInput(
+      "file",
+      "Upload Excel File",
+      accept = c(".xlsx",".xls")
+    ),
+    
+    uiOutput("ingredient_ui"),
+    
+    numericInput(
+      "top_n",
+      "Number of Similar Ingredients",
+      value = 5,
+      min = 1
+    )
+    
+  ),
+  
+  dashboardBody(
+    
+    tabBox(
+      width = 12,
+      
+      tabPanel(
+        "Original Data",
+        DTOutput("raw_table")
+      ),
+      
+      tabPanel(
+        "Analysis",
+        
+        br(),
+        
+        h3("PCA Loading Plot"),
+        
+        plotOutput(
+          "pca_plot",
+          height = "700px"
+        ),
+        
+        downloadButton(
+          "download_pca",
+          "Download PCA PDF"
+        ),
+        
+        br(),
+        br(),
+        
+        h3("Fuzzy Cluster Plot"),
+        
+        plotOutput(
+          "cluster_plot",
+          height = "700px"
+        ),
+        
+        downloadButton(
+          "download_cluster",
+          "Download Cluster PDF"
+        ),
+        
+        br(),
+        br(),
+        
+        h3("Ingredient Legend"),
+        
+        DTOutput(
+          "legend_table"
+        )
+        
+      ),
+      
+      tabPanel(
+        
+        "Similar Ingredients",
+        
+        DTOutput(
+          "similar_table"
+        ),
+        
+        br(),
+        
+        downloadButton(
+          "download_similar",
+          "Download Similar Ingredients Excel"
+        )
+        
+      )
+      
+    )
+    
+  )
+  
+)
+server <- function(input, output, session){
+  
+  results <- reactive({
+    
+    req(input$file)
+    
+    run_analysis(
+      input$file$datapath
+    )
+    
+  })
+  output$ingredient_ui <- renderUI({
+    
+    req(results())
+    
+    selectInput(
+      "ingredient",
+      "Select Ingredient",
+      choices =
+        results()$ingredient_names
+    )
+    
+  })
+  
+  output$raw_table <- renderDT({
+    
+    datatable(
+      
+      results()$raw_df,
+      
+      options = list(
+        
+        pageLength = 10,
+        
+        scrollX = TRUE
+        
+      )
+      
+    )
+    
+  })
+  output$pca_plot <- renderPlot({
+    
+    req(results())
+    
+    fviz_pca_var(
+      
+      results()$pca_model,
+      
+      repel = TRUE,
+      
+      col.var = "contrib",
+      
+      gradient.cols = c(
+        "blue",
+        "orange",
+        "red"
+      )
+      
+    ) +
+      
+      ggtitle(
+        "PCA Loading Plot"
+      )
+    
+  })
+  output$cluster_plot <- renderPlot({
+    
+    req(results())
+    
+    print(
+      results()$cluster_plot
+    )
+    
+  })
+  output$legend_table <- renderDT({
+    
+    datatable(
+      
+      results()$ingredient_legend,
+      
+      options = list(
+        pageLength = 10
+      )
+      
+    )
+    
+  })
+  similar_df <- reactive({
+    
+    req(
+      input$ingredient
+    )
+    
+    pca_scores <-
+      results()$pca_scores
+    
+    selected_index <-
+      which(
+        results()$ingredient_names ==
+          input$ingredient
+      )
+    
+    distances <-
+      apply(
+        
+        pca_scores,
+        
+        1,
+        
+        function(x){
+          
+          sqrt(
+            
+            sum(
+              
+              (
+                x -
+                  pca_scores[
+                    selected_index,
+                  ]
+                
+              )^2
+              
+            )
+            
+          )
+          
+        }
+        
+      )
+    
+    sim_df <- data.frame(
+      
+      Ingredient =
+        results()$ingredient_names,
+      
+      Distance =
+        distances
+      
+    )
+    
+    sim_df <- sim_df %>%
+      
+      arrange(
+        Distance
+      )
+    
+    sim_df <- sim_df[
+      2:(input$top_n + 1),
+    ]
+    
+    sim_df
+    
+  })
+  output$similar_table <- renderDT({
+    
+    datatable(
+      
+      similar_df(),
+      
+      options = list(
+        pageLength = 10
+      )
+      
+    )
+    
+  })
+  output$download_pca <- downloadHandler(
+    
+    filename = function(){
+      
+      "PCA_Loading_Plot.pdf"
+      
+    },
+    
+    content = function(file){
+      
+      pdf(
+        file,
+        width = 10,
+        height = 8
+      )
+      
+      print(
+        
+        fviz_pca_var(
+          
+          results()$pca_model,
+          
+          repel = TRUE
+          
+        )
+        
+      )
+      
+      dev.off()
+      
+    }
+    
+  )
+  output$download_cluster <- downloadHandler(
+    
+    filename = function(){
+      
+      "Cluster_Plot.pdf"
+      
+    },
+    
+    content = function(file){
+      
+      pdf(
+        file,
+        width = 10,
+        height = 8
+      )
+      
+      cluster_df <-
+        results()$cluster_plot_data
+      
+      p <- ggplot(
+        
+        cluster_df,
+        
+        aes(
+          PC1,
+          PC2,
+          color =
+            factor(Cluster)
+        )
+        
+      ) +
+        
+        geom_point() +
+        
+        geom_text_repel(
+          
+          aes(
+            label =
+              Serial_No
+          )
+          
+        )
+      
+      print(p)
+      
+      dev.off()
+      
+    }
+    
+  )
+  output$download_similar <- downloadHandler(
+    
+    filename = function(){
+      
+      "Similar_Ingredients.xlsx"
+      
+    },
+    
+    content = function(file){
+      
+      write_xlsx(
+        
+        similar_df(),
+             
+        path = file
+        
+      )
+      
+    }
+    
+  )
+}
+
+shinyApp(
+  ui = ui,
+  server = server
+)
