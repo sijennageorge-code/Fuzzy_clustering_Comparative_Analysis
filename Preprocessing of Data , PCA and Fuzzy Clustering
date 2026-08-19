@@ -1,0 +1,689 @@
+## Script 1 that includes the cleaning up , encoding , correlation , pca and fuzzy clustering
+
+##part1(processing)
+
+run_analysis <- function(file_path){
+library(readxl)
+library(dplyr)
+library(stringr)
+library(Hmisc)
+library(corrplot)
+library(openxlsx)
+library(factoextra)
+library(e1071)
+
+
+
+  raw_df <- read_excel(file_path)
+raw_df <- raw_df %>%
+  filter(
+    !if_all(
+      everything(),
+      is.na
+    )
+  )
+
+names(raw_df) <- trimws(names(raw_df))
+
+raw_df <- raw_df %>%
+  select(
+    -matches("^Unnamed"),
+    -matches("^\\.\\.\\.")
+  )
+
+
+ingredient_col <- names(raw_df)[1]
+
+ingredient_names <- raw_df[[ingredient_col]]
+
+normalize_range <- function(x){
+  
+  x <- gsub("–", "-", x)
+  x <- gsub("—", "-", x)
+  x <- gsub("to", "-", x)
+  
+  x
+  
+} 
+is_range_column <- function(x){
+  
+  x <- normalize_range(
+    as.character(x)
+  )
+  
+  x <- trimws(x)
+  
+  valid <- x[!is.na(x)]
+  
+  if(length(valid)==0)
+    return(FALSE)
+  
+  range_count <- sum(
+    grepl(
+      "^\\s*[0-9.]+\\s*-\\s*[0-9.]+\\s*$",
+      valid
+    )
+  )
+  
+  return(
+    range_count/length(valid) > 0.5
+  )
+}
+
+range_cols <- names(raw_df)[
+  sapply(raw_df,is_range_column)
+]
+
+
+
+for(col in range_cols){
+  
+  values <- normalize_range(
+    as.character(raw_df[[col]])
+  )
+  
+  low_vals <- rep(NA,nrow(raw_df))
+  high_vals <- rep(NA,nrow(raw_df))
+  
+  for(i in seq_along(values)){
+    
+    val <- values[i]
+    
+    if(
+      !is.na(val) &&
+      grepl(
+        "^\\s*[0-9.]+\\s*-\\s*[0-9.]+\\s*$",
+        val
+      )
+    ){
+      
+      nums <- as.numeric(
+        strsplit(
+          gsub("\\s","",val),
+          "-"
+        )[[1]]
+      )
+      
+      low_vals[i] <- nums[1]
+      high_vals[i] <- nums[2]
+    }
+  }
+  
+  raw_df[[paste0(col,"_Low")]] <- low_vals
+  
+  raw_df[[paste0(col,"_High")]] <- high_vals
+}
+
+
+raw_df <- raw_df %>%
+  select(
+    -all_of(range_cols)
+  )
+
+clean_numeric <- function(x){
+  
+  x <- as.character(x)
+  
+  x <- trimws(x)
+  
+  x <- gsub("₹","",x)
+  x <- gsub("%","",x)
+  
+  x <- gsub("°C","",x)
+  x <- gsub("⁰C","",x)
+  x <- gsub("⁰ C","",x)
+  
+  x <- gsub("<","",x)
+  x <- gsub(">","",x)
+  
+  x <- gsub("/kg","",x)
+  x <- gsub("/Kg","",x)
+  
+  x <- gsub(",","",x)
+  
+  suppressWarnings(
+    as.numeric(x)
+  )
+}
+
+for(col in names(raw_df)){
+  
+  if(
+    col != "Surfactant_Ingredient_Name"
+  ){
+    
+    temp <- clean_numeric(
+      raw_df[[col]]
+    )
+    
+    if(
+      sum(!is.na(temp))
+      >
+      0.5*nrow(raw_df)
+    ){
+      
+      raw_df[[col]] <- temp
+    }
+  }
+}
+
+processed_df <- raw_df
+
+encoding_key <- data.frame()
+
+categorical_cols <- names(processed_df)[
+  sapply(
+    processed_df,
+    function(x)
+      is.character(x) ||
+      is.factor(x)
+  )
+]
+
+categorical_cols <- setdiff(
+  categorical_cols,
+  "Surfactant_Ingredient_Name"
+)
+
+
+for(col in categorical_cols){
+  
+  levs <- levels(
+    factor(
+      processed_df[[col]]
+    )
+  )
+  
+  processed_df[[col]] <- as.numeric(
+    factor(
+      processed_df[[col]]
+    )
+  )
+  
+  temp <- data.frame(
+    Column = col,
+    Original_Value = levs,
+    Encoded_Value = seq_along(levs)
+  )
+  
+  encoding_key <- rbind(
+    encoding_key,
+    temp
+  )
+}
+
+for(col in names(processed_df)){
+  
+  if(
+    col !=
+    "Surfactant_Ingredient_Name"
+  ){
+    
+    if(any(is.na(processed_df[[col]]))){
+      
+      med <- median(
+        processed_df[[col]],
+        na.rm = TRUE
+      )
+      
+      if(is.na(med))
+        med <- 0
+      
+      processed_df[[col]][
+        is.na(processed_df[[col]])
+      ] <- med
+    }
+  }
+}
+
+analysis_df <- processed_df %>%
+  select(
+    -all_of(ingredient_col)
+  )
+
+zero_var_cols <- names(
+  which(
+    sapply(
+      analysis_df,
+      sd
+    ) == 0
+  )
+)
+
+
+analysis_df <- analysis_df %>%
+  select(
+    -any_of(
+      zero_var_cols
+    )
+  )
+
+##part2(correlation)
+
+cor_matrix <- cor(
+  analysis_df,
+  method = "pearson",
+  use = "pairwise.complete.obs"
+)
+
+cor_results <- rcorr(
+  as.matrix(analysis_df),
+  type = "pearson"
+)
+
+p_matrix <- cor_results$P
+
+
+cor_matrix_round <- round(
+  cor_matrix,
+  3
+)
+
+p_matrix_round <- round(
+  p_matrix,
+  4
+)
+
+
+plot_cor <- cor_matrix
+
+short_names <- c()
+
+for(i in seq_along(colnames(plot_cor))){
+  
+  nm <- colnames(plot_cor)[i]
+  
+  if(grepl("Category", nm))
+    nm <- "Category"
+  
+  if(grepl("Lather", nm))
+    nm <- "Lather"
+  
+  if(grepl("HLB", nm))
+    nm <- "HLB"
+  
+  if(grepl("log_P", nm))
+    nm <- "LogP"
+  
+  if(grepl("cmc", nm))
+    nm <- "CMC"
+  
+  if(grepl("Surface", nm))
+    nm <- "SurfaceT"
+  
+  if(grepl("pH_Stability_Range_Low", nm))
+    nm <- "pH_Low"
+  
+  if(grepl("pH_Stability_Range_High", nm))
+    nm <- "pH_High"
+  
+  if(grepl("Active concentration", nm) &&
+     grepl("Low", nm))
+    nm <- "Act_Low"
+  
+  if(grepl("Active concentration", nm) &&
+     grepl("High", nm))
+    nm <- "Act_High"
+  
+  short_names <- c(
+    short_names,
+    nm
+  )
+}
+
+colnames(plot_cor) <- short_names
+rownames(plot_cor) <- short_names
+
+
+corrplot(
+  plot_cor,
+  
+  method = "color",
+  
+  type = "full",
+  
+  order = "original",
+  
+  tl.col = "black",
+  
+  tl.cex = 1,
+  
+  tl.srt = 45,
+  
+  cl.cex = 1,
+  
+  mar = c(2,2,3,2)
+)
+
+title(
+  "Pearson Correlation Heatmap",
+  line = 1
+)
+
+
+correlation_matrix <- cor_matrix
+
+##part 3(pca analysis)
+
+pca_data <- analysis_df
+
+pca_data <- pca_data[
+  ,
+  apply(
+    pca_data,
+    2,
+    function(x)
+      sd(x, na.rm = TRUE) > 0
+  )
+]
+
+pca_result <- prcomp(
+  pca_data,
+  center = TRUE,
+  scale. = TRUE
+)
+
+
+pca_plot <- fviz_pca_var(
+  pca_result,
+  
+  col.var = "contrib",
+  
+  gradient.cols = c(
+    "blue",
+    "orange",
+    "red"
+  ),
+  
+  repel = TRUE
+) +
+  ggplot2::ggtitle(
+    "PCA Loading Plot"
+  )
+
+pca_model <- pca_result
+pca_loadings <- pca_model$rotation
+pca_scores <- as.data.frame(
+  pca_model$x
+)
+
+##part 4(fuzzy clustering)
+
+cluster_data <- analysis_df
+
+cluster_data <- cluster_data[
+  ,
+  !grepl("^\\.\\.\\.", names(cluster_data))
+]
+
+cluster_data <- as.data.frame(
+  scale(cluster_data)
+)
+
+xie_beni <- function(data, model){
+  
+  centers <- model$centers
+  
+  membership <- model$membership
+  
+  m <- model$m
+  
+  numerator <- 0
+  
+  for(i in 1:nrow(data)){
+    
+    for(j in 1:nrow(centers)){
+      
+      numerator <- numerator +
+        (membership[i,j]^m) *
+        sum(
+          (as.numeric(data[i,]) -
+             as.numeric(centers[j,]))^2
+        )
+      
+    }
+    
+  }
+  
+  center_dist <- as.matrix(
+    dist(centers)
+  )
+  
+  center_dist[
+    center_dist == 0
+  ] <- Inf
+  
+  min_dist <- min(center_dist)
+  
+  xb <- numerator /
+    (
+      nrow(data) *
+        (min_dist^2)
+    )
+  
+  return(
+    as.numeric(xb)
+  )
+  
+}
+
+cluster_results <- data.frame()
+
+max_clusters <- min(
+  10,
+  nrow(cluster_data)-1
+)
+
+for(k in 2:max_clusters){
+  
+  set.seed(123)
+  
+  model <- cmeans(
+    
+    cluster_data,
+    
+    centers = k,
+    
+    m = 2,
+    
+    iter.max = 500
+    
+  )
+  
+  xb <- xie_beni(
+    cluster_data,
+    model
+  )
+  
+  cluster_results <- rbind(
+    
+    cluster_results,
+    
+    data.frame(
+      
+      Clusters = k,
+      
+      Xie_Beni = xb
+      
+    )
+    
+  )
+  
+}
+
+best_k <- cluster_results$Clusters[
+  which.min(
+    cluster_results$Xie_Beni
+  )
+]
+
+
+set.seed(123)
+
+fuzzy_result <- cmeans(
+  
+  cluster_data,
+  
+  centers = best_k,
+  
+  m = 2,
+  
+  iter.max = 500
+  
+)
+
+cluster_assignment <- apply(
+  
+  fuzzy_result$membership,
+  
+  1,
+  
+  which.max
+  
+)
+
+cluster_pca <- prcomp(
+  
+  cluster_data,
+  
+  center = TRUE,
+  
+  scale. = TRUE
+  
+)
+
+cluster_plot_data <- data.frame(
+  
+  PC1 = cluster_pca$x[,1],
+  
+  PC2 = cluster_pca$x[,2],
+  
+  Cluster = factor(cluster_assignment),
+  
+  Serial_No = 1:length(cluster_assignment)
+  
+)
+
+ingredient_legend <- data.frame(
+  
+  Serial_No = 1:length(ingredient_names),
+  
+  Ingredient = ingredient_names,
+  
+  Cluster = cluster_assignment
+  
+)
+
+cluster_plot <- fviz_cluster(
+  
+  list(
+    
+    data = cluster_data,
+    
+    cluster = cluster_assignment
+    
+  ),
+  
+  geom = "point",
+  
+  ellipse.type = "convex",
+  
+  show.clust.cent = FALSE,
+  
+  repel = FALSE
+  
+)
+
+cluster_plot <- cluster_plot +
+  
+  geom_text_repel(
+    
+    data = cluster_plot_data,
+    
+    aes(
+      
+      x = PC1,
+      
+      y = PC2,
+      
+      label = Serial_No
+      
+    ),
+    
+    size = 4,
+    
+    show.legend = FALSE,
+    
+    inherit.aes = FALSE
+    
+  ) +
+  
+  ggplot2::labs(
+    
+    title = paste(
+      
+      "Fuzzy Clustering (k =",
+      
+      best_k,
+      
+      ")"
+      
+    )
+    
+  )
+
+
+best_cluster_number <- best_k
+
+cluster_membership <- fuzzy_result$membership
+
+cluster_assignments <- cluster_assignment
+
+## part 5(return function)
+
+return(
+  
+  list(
+    
+    raw_df = raw_df,
+    
+    processed_df = processed_df,
+    
+    analysis_df = analysis_df,
+    
+    ingredient_column_name = ingredient_col,
+    
+    ingredient_names = ingredient_names,
+    
+    encoding_key = encoding_key,
+    
+    correlation_matrix = correlation_matrix,
+    
+    p_matrix = p_matrix,
+    
+    pca_model = pca_model,
+    
+    pca_scores = pca_scores,
+    
+    pca_loadings = pca_loadings,
+    
+    pca_plot = pca_plot,
+    
+    fuzzy_result = fuzzy_result,
+    
+    cluster_assignments = cluster_assignments,
+    
+    cluster_membership = cluster_membership,
+    
+    ingredient_legend = ingredient_legend,
+    
+    best_cluster_number = best_cluster_number,
+    
+    cluster_plot_data = cluster_plot_data,
+    
+    cluster_plot = cluster_plot
+    
+  )
+  
+)
+}
